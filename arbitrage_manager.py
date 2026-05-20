@@ -1,3 +1,4 @@
+```python
 """
 Arbitrage Manager v1.0 - Cross-Venue Funding Rate Arbitrage
 Cash & Carry and Reverse Cash & Carry Strategies for Kraken Spot ↔ Perpetual
@@ -47,7 +48,7 @@ class ArbitrageManager:
             if result.returncode == 0:
                 return json.loads(result.stdout)
             else:
-                print(f"   ⚠️  Spot ticker fetch failed for {pair}: {result.stderr}")
+                print(f"   ⚠️  Spot ticker fetch failed for {pair}: {result.stderr.strip()}")
                 return None
                 
         except Exception as e:
@@ -68,13 +69,57 @@ class ArbitrageManager:
             if result.returncode == 0:
                 return json.loads(result.stdout)
             else:
-                print(f"   ⚠️  Futures ticker fetch failed for {perp_pair}: {result.stderr}")
+                print(f"   ⚠️  Futures ticker fetch failed for {perp_pair}: {result.stderr.strip()}")
                 return None
                 
         except Exception as e:
             print(f"   ❌ Error fetching futures ticker for {pair}: {e}")
             return None
     
+    def _parse_ticker_prices(self, ticker_payload: Dict, pair: str) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Safely extracts best ask and bid prices from Kraken CLI JSON layouts.
+        Handles nested assets under standard "result" blocks or flat keys.
+        """
+        if not ticker_payload:
+            return None, None
+            
+        # Isolate results block if wrapped inside a result key
+        data = ticker_payload.get("result", ticker_payload)
+        
+        # Look for the asset details inside the dictionary
+        pair_data = data.get(pair)
+        
+        if not pair_data:
+            # Check for alternative naming conventions (e.g. BTCUSD vs XXBTZUSD)
+            clean_pairs = {k.replace("/", "").replace("-", ""): v for k, v in data.items() if isinstance(v, dict)}
+            clean_target = pair.replace("/", "").replace("-", "")
+            pair_data = clean_pairs.get(clean_target)
+            
+        if not pair_data and isinstance(data, dict):
+            # Fallback if asks/bids are directly at root level
+            ask_val = data.get("ask") or data.get("a")
+            bid_val = data.get("bid") or data.get("b")
+            
+            if ask_val and bid_val:
+                final_ask = float(ask_val[0]) if isinstance(ask_val, list) else float(ask_val)
+                final_bid = float(bid_val[0]) if isinstance(bid_val, list) else float(bid_val)
+                return final_ask, final_bid
+                
+        if isinstance(pair_data, dict):
+            # Extract standard Kraken ticker properties: 'a' for ask, 'b' for bid
+            ask_val = pair_data.get("a") or pair_data.get("ask")
+            bid_val = pair_data.get("b") or pair_data.get("bid")
+            
+            try:
+                final_ask = float(ask_val[0]) if isinstance(ask_val, list) else float(ask_val)
+                final_bid = float(bid_val[0]) if isinstance(bid_val, list) else float(bid_val)
+                return final_ask, final_bid
+            except (IndexError, ValueError, TypeError):
+                pass
+                
+        return None, None
+
     def fetch_funding_rate(self, pair: str) -> Optional[float]:
         """Fetch current funding rate for perpetual contract"""
         try:
@@ -88,9 +133,11 @@ class ArbitrageManager:
             
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                return data.get("fundingRate", None)
+                unwrapped = data.get("result", data)
+                val = unwrapped.get("fundingRate") or unwrapped.get("funding_rate")
+                return float(val) if val is not None else None
             else:
-                print(f"   ⚠️  Funding rate fetch failed for {perp_pair}: {result.stderr}")
+                print(f"   ⚠️  Funding rate fetch failed for {perp_pair}: {result.stderr.strip()}")
                 return None
                 
         except Exception as e:
@@ -129,27 +176,25 @@ class ArbitrageManager:
         """
         print(f"\n   📊 Scanning {pair}...")
         
-        # Fetch market data
-        spot_ticker = self.fetch_kraken_spot_ticker(pair)
-        if not spot_ticker:
+        # Fetch raw market data
+        spot_ticker_payload = self.fetch_kraken_spot_ticker(pair)
+        if not spot_ticker_payload:
             return None
         
-        futures_ticker = self.fetch_kraken_futures_ticker(pair)
-        if not futures_ticker:
+        futures_ticker_payload = self.fetch_kraken_futures_ticker(pair)
+        if not futures_ticker_payload:
             return None
         
         funding_rate = self.fetch_funding_rate(pair)
         if funding_rate is None:
             return None
         
-        # Extract prices
-        spot_ask = spot_ticker.get("ask")
-        spot_bid = spot_ticker.get("bid")
-        perp_bid = futures_ticker.get("bid")
-        perp_ask = futures_ticker.get("ask")
+        # Safely extract bid/ask prices via parsing utility
+        spot_ask, spot_bid = self._parse_ticker_prices(spot_ticker_payload, pair)
+        perp_ask, perp_bid = self._parse_ticker_prices(futures_ticker_payload, pair.replace("USD", "-PERP"))
         
-        if not all([spot_ask, perp_bid]):
-            print(f"   ⚠️  Incomplete price data for {pair}")
+        if not spot_ask or not perp_bid:
+            print(f"   ⚠️  Incomplete or unparsed price data for {pair}")
             return None
         
         # Calculate yields
@@ -200,7 +245,7 @@ class ArbitrageManager:
             buy_result = subprocess.run(buy_cmd, capture_output=True, text=True, timeout=10)
             
             if buy_result.returncode != 0:
-                print(f"   ❌ Spot buy failed: {buy_result.stderr}")
+                print(f"   ❌ Spot buy failed: {buy_result.stderr.strip()}")
                 return False
             
             print(f"   ✅ Spot BUY executed")
@@ -215,7 +260,7 @@ class ArbitrageManager:
             short_result = subprocess.run(short_cmd, capture_output=True, text=True, timeout=10)
             
             if short_result.returncode != 0:
-                print(f"   ❌ Futures SHORT failed: {short_result.stderr}")
+                print(f"   ❌ Futures SHORT failed: {short_result.stderr.strip()}")
                 return False
             
             print(f"   ✅ Perpetual SHORT executed")
@@ -302,3 +347,5 @@ if __name__ == "__main__":
         opportunities = manager.scan_all_pairs()
         if opportunities:
             print(f"\n✅ Found {len(opportunities)} opportunity(ies)")
+
+```
