@@ -1,6 +1,6 @@
 """
 Titan Predator v4.1 - Dual-Protocol Autonomous Trading Agent
-Integrates Kraken MCP with Gemini 3.1 Pro for institutional-grade execution
+Integrates Kraken MCP with Gemini 2.5 Pro for institutional-grade execution
 PRIMARY PROTOCOL: Microstructure hunting (value compression + liquidity springs)
 SECONDARY PROTOCOL: Funding rate anomaly detection + arbitrage capital signaling
 """
@@ -10,11 +10,16 @@ import json
 import subprocess
 import time
 from datetime import datetime
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# Initialize Google GenAI Client
-client = genai.Client()
+# Load environment variables
+load_dotenv()
+
+# Initialize Google GenAI Client safely across common environment keys
+api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=api_key)
 
 # Titan v4.1 System Instruction (Dual-Protocol)
 TITAN_V4_1_SYSTEM_INSTRUCTION = """
@@ -62,46 +67,49 @@ Expected Output JSON Schema:
   "protocol": "microstructure" | "arbitrage" | "neutral",
   "confidence": 0.0-1.0,
   "signal_type": "value_compression" | "liquidity_spring" | "funding_anomaly" | "none",
-  "pair": "ONDOUSD" or affected pair,
+  "pair": "ONDOUSD",
   "order_type": "limit" | "market" | null,
   "price": "target_limit_price_or_null",
   "volume": "calculated_order_size_or_null",
   "stop_loss": "calculated_stop_loss_or_null",
   "take_profit": "calculated_target_or_null",
-  "capital_allocation_pct": 0-100 for arbitrage,
+  "capital_allocation_pct": 0-100,
   "rationale": "Brief structural reason",
   "risk_reward_ratio": "calculated_ratio_or_null"
 }
 """
 
 def get_kraken_market_data(pair="ONDOUSD"):
-    """Fetch real-time order book and market structure state"""
+    """Fetch real-time order book and market structure state safely unwrapping system data"""
     try:
         orderbook_result = subprocess.run(
             ["kraken", "orderbook", pair, "--depth", "20", "-o", "json"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=5
         )
         
         if orderbook_result.returncode != 0:
             print(f"   ⚠️  Orderbook fetch failed: {orderbook_result.stderr}")
             return None
         
-        orderbook = json.loads(orderbook_result.stdout)
+        raw_ob = json.loads(orderbook_result.stdout)
+        # Unwrap standard Kraken result nesting if present
+        orderbook = raw_ob.get("result", raw_ob)
         
         ticker_result = subprocess.run(
             ["kraken", "ticker", pair, "-o", "json"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=5
         )
         
         if ticker_result.returncode != 0:
             print(f"   ⚠️  Ticker fetch failed: {ticker_result.stderr}")
             return None
         
-        ticker = json.loads(ticker_result.stdout)
+        raw_tick = json.loads(ticker_result.stdout)
+        ticker = raw_tick.get("result", raw_tick)
         
         market_data = {
             "pair": pair,
@@ -116,7 +124,7 @@ def get_kraken_market_data(pair="ONDOUSD"):
         return None
 
 def get_kraken_funding_rates():
-    """Fetch funding rates for arbitrage pairs"""
+    """Fetch funding rates across core assets with strict localized timeout parameters"""
     funding_data = {}
     pairs = ["BTCUSD", "ETHUSD", "SOLUSD", "LINKUSD"]
     
@@ -127,18 +135,20 @@ def get_kraken_funding_rates():
                 ["kraken", "funding_rate", perp_pair, "-o", "json"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=3
             )
             
             if result.returncode == 0:
-                data = json.loads(result.stdout)
-                funding_rate = data.get("fundingRate", 0)
-                is_extreme = funding_rate > 0.001  # 0.1% per epoch
+                raw_data = json.loads(result.stdout)
+                data = raw_data.get("result", raw_data)
+                
+                funding_rate = data.get("fundingRate", 0) or data.get("funding_rate", 0)
+                is_extreme = float(funding_rate) > 0.001
                 
                 funding_data[pair] = {
-                    "funding_rate": funding_rate,
+                    "funding_rate": float(funding_rate),
                     "is_extreme": is_extreme,
-                    "annualized": funding_rate * 365 * 100  # Quick annualization
+                    "annualized": float(funding_rate) * 365 * 100
                 }
         except Exception as e:
             print(f"   ⚠️  Funding rate fetch failed for {pair}: {e}")
@@ -165,8 +175,8 @@ def execute_kraken_order(decision):
     order_type = decision.get("order_type", "market")
     confidence = decision.get("confidence", 0)
     
-    if volume is None or volume == 0:
-        print(f"   ⚠️  Invalid volume. Order not executed.")
+    if volume is None or str(volume) == "null" or float(volume) == 0:
+        print(f"   ⚠️  Invalid volume parameter. Order aborted.")
         return None
     
     try:
@@ -176,7 +186,7 @@ def execute_kraken_order(decision):
             print(f"      Order Type: {order_type}")
             print(f"      Volume: {volume}")
             
-            if order_type == "limit" and price:
+            if str(order_type).lower() == "limit" and price and str(price) != "null":
                 cmd = ["kraken", "paper", "order", "buy", pair, "limit", str(volume), str(price)]
                 print(f"      Price (Limit): {price}")
             else:
@@ -186,10 +196,10 @@ def execute_kraken_order(decision):
             
             if result.returncode == 0:
                 print(f"   ✅ KRAKEN PAPER CONFIRMATION:")
-                print(f"      {result.stdout}")
+                print(f"      {result.stdout.strip()}")
                 return {"status": "success", "action": "BUY", "output": result.stdout}
             else:
-                print(f"   ❌ KRAKEN ERROR: {result.stderr}")
+                print(f"   ❌ KRAKEN ERROR: {result.stderr.strip()}")
                 return {"status": "error", "action": "BUY", "error": result.stderr}
                 
         elif action == "SELL":
@@ -197,7 +207,7 @@ def execute_kraken_order(decision):
             print(f"      Confidence: {confidence:.0%}")
             print(f"      Volume: {volume}")
             
-            if order_type == "limit" and price:
+            if str(order_type).lower() == "limit" and price and str(price) != "null":
                 cmd = ["kraken", "paper", "order", "sell", pair, "limit", str(volume), str(price)]
                 print(f"      Price (Limit): {price}")
             else:
@@ -207,21 +217,23 @@ def execute_kraken_order(decision):
             
             if result.returncode == 0:
                 print(f"   ✅ KRAKEN PAPER CONFIRMATION:")
-                print(f"      {result.stdout}")
+                print(f"      {result.stdout.strip()}")
                 return {"status": "success", "action": "SELL", "output": result.stdout}
             else:
-                print(f"   ❌ KRAKEN ERROR: {result.stderr}")
+                print(f"   ❌ KRAKEN ERROR: {result.stderr.strip()}")
                 return {"status": "error", "action": "SELL", "error": result.stderr}
     
     except subprocess.TimeoutExpired:
-        print(f"   ⚠️  Kraken command timeout")
+        print(f"   ⚠️  Kraken command execution timed out.")
         return {"status": "timeout", "action": action}
     except Exception as e:
         print(f"   ❌ Execution error: {e}")
         return {"status": "error", "action": action, "error": str(e)}
 
 def run_titan_v4_1(single_shot=False):
-    """Main Titan Predator v4.1 dual-protocol execution cycle"""
+    """Main Titan Predator v4.1 dual-protocol execution cycle using valid SDK production models"""
+    # Using the native corporate generative target model for architecture validation
+    target_model = "gemini-2.5-pro"
     
     if single_shot:
         print("\n" + "=" * 70)
@@ -249,7 +261,6 @@ def run_titan_v4_1(single_shot=False):
             print(f"\n[{timestamp}] Monitoring Cycle #{cycle_count}")
             print("-" * 70)
             
-            # PRIMARY PROTOCOL: Fetch microstructure
             print("   📊 PRIMARY PROTOCOL: Fetching microstructure...")
             market_data = get_kraken_market_data("ONDOUSD")
             
@@ -262,12 +273,10 @@ def run_titan_v4_1(single_shot=False):
             
             print("   ✅ Market data retrieved")
             
-            # SECONDARY PROTOCOL: Check funding rates
             print("   💰 SECONDARY PROTOCOL: Checking funding rates...")
             funding_rates = get_kraken_funding_rates()
             print("   ✅ Funding rates retrieved")
             
-            # Package data for Gemini
             prompt = f"""
 DUAL-PROTOCOL MARKET ANALYSIS REQUEST - TITAN PREDATOR v4.1
 
@@ -300,9 +309,9 @@ Output ONLY valid JSON with no additional text.
 """
 
             try:
-                print("   🧠 Gemini analyzing dual protocols...")
+                print(f"   🧠 Gemini analyzing dual protocols via {target_model}...")
                 response = client.models.generate_content(
-                    model='gemini-3.1-pro',
+                    model=target_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=TITAN_V4_1_SYSTEM_INSTRUCTION,
@@ -312,7 +321,6 @@ Output ONLY valid JSON with no additional text.
                     )
                 )
                 
-                # Parse response
                 decision_text = response.text.strip()
                 
                 if decision_text.startswith("```json"):
@@ -325,7 +333,6 @@ Output ONLY valid JSON with no additional text.
                 print(f"\n   [TITAN v4.1 EVALUATION RESULT]:")
                 print(json.dumps(decision, indent=6))
                 
-                # Execute decision
                 execution_result = execute_kraken_order(decision)
                 
                 if execution_result:
@@ -339,11 +346,9 @@ Output ONLY valid JSON with no additional text.
             except Exception as e:
                 print(f"   ❌ Gemini analysis error: {e}")
             
-            # Exit if single-shot mode
             if single_shot:
                 break
             
-            # Wait before next cycle
             print(f"\n   ⏰ Next scan in 30 seconds...")
             time.sleep(30)
     
