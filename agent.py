@@ -1,7 +1,9 @@
+```python
 #!/usr/bin/env python3
 """
-AI-Native Kraken Trading Agent - Phase 1
+AI-Native Kraken Trading Agent - Phase 1 (Robust Edition)
 Initializes Kraken CLI connection and performs market analysis
+Compatible with standard Kraken nested JSON responses
 """
 
 import os
@@ -11,7 +13,7 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables from .env file securely
 load_dotenv()
 
 class KrakenAgent:
@@ -48,9 +50,33 @@ class KrakenAgent:
             return False
         print("✅ API credentials loaded")
         return True
+
+    def _unwrap_payload(self, raw_payload, key_target=None):
+        """
+        Safely extracts the active data layer from Kraken CLI JSON structures.
+        Bypasses the outer 'result' block and nested asset keys dynamically.
+        """
+        if not raw_payload:
+            return {}
+        
+        # Unwrap standard Kraken response nesting
+        data = raw_payload.get("result", raw_payload)
+        
+        if key_target and isinstance(data, dict):
+            # Look for explicit key matching (e.g., ONDOUSD)
+            if key_target in data:
+                return data[key_target]
+            
+            # Look for alternative key transformations
+            clean_pairs = {k.replace("/", "").replace("-", ""): v for k, v in data.items() if isinstance(v, dict)}
+            clean_target = key_target.replace("/", "").replace("-", "")
+            if clean_target in clean_pairs:
+                return clean_pairs[clean_target]
+                
+        return data
     
     def get_ticker(self, pair=None):
-        """Fetch ticker data for a trading pair"""
+        """Fetch ticker data for a trading pair safely un-wrapping metadata"""
         if pair is None:
             pair = self.pair
             
@@ -64,12 +90,13 @@ class KrakenAgent:
             )
             
             if result.returncode == 0:
-                data = json.loads(result.stdout)
+                raw_data = json.loads(result.stdout)
+                data = self._unwrap_payload(raw_data, pair)
                 print(f"✅ Ticker data retrieved:")
                 print(json.dumps(data, indent=2))
                 return data
             else:
-                print(f"❌ Error fetching ticker: {result.stderr}")
+                print(f"❌ Error fetching ticker: {result.stderr.strip()}")
                 return None
                 
         except Exception as e:
@@ -88,7 +115,8 @@ class KrakenAgent:
             )
             
             if result.returncode == 0:
-                data = json.loads(result.stdout)
+                raw_data = json.loads(result.stdout)
+                data = self._unwrap_payload(raw_data)
                 print(f"✅ Paper balance:")
                 print(json.dumps(data, indent=2))
                 return data
@@ -101,7 +129,7 @@ class KrakenAgent:
             return None
     
     def analyze_orderbook(self, pair=None, depth=10):
-        """Analyze order book for bid-ask spread"""
+        """Analyze order book safely processing nested bids and asks"""
         if pair is None:
             pair = self.pair
             
@@ -115,12 +143,16 @@ class KrakenAgent:
             )
             
             if result.returncode == 0:
-                data = json.loads(result.stdout)
+                raw_data = json.loads(result.stdout)
+                data = self._unwrap_payload(raw_data, pair)
                 
-                # Extract bid/ask spread
-                if "bids" in data and "asks" in data and len(data["bids"]) > 0 and len(data["asks"]) > 0:
-                    best_bid = float(data["bids"][0][0])
-                    best_ask = float(data["asks"][0][0])
+                bids = data.get("bids", [])
+                asks = data.get("asks", [])
+                
+                # Verify that unwrapped order book metrics are present
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
                     spread = best_ask - best_bid
                     spread_pct = (spread / best_bid) * 100
                     
@@ -137,10 +169,10 @@ class KrakenAgent:
                     print(json.dumps(analysis, indent=2))
                     return analysis
                 else:
-                    print(f"❌ Invalid order book data: {data}")
+                    print(f"❌ Invalid or empty unwrapped order book data: {data}")
                     return None
             else:
-                print(f"❌ Error fetching order book: {result.stderr}")
+                print(f"❌ Error fetching order book: {result.stderr.strip()}")
                 return None
                 
         except Exception as e:
@@ -158,7 +190,8 @@ class KrakenAgent:
             sys.exit(1)
         
         # Step 2: Check Credentials
-        if not self.check_credentials():
+        has_credentials = self.check_credentials()
+        if not has_credentials:
             print("⚠️  Continuing with public endpoints only (no trading)")
         
         # Step 3: Fetch Market Data
@@ -175,14 +208,16 @@ class KrakenAgent:
         print("📋 PHASE 1 TEST SUMMARY")
         print("=" * 60)
         print("✅ Kraken CLI installed and verified")
-        print("✅ API credentials configured" if self.check_credentials() else "⚠️  Running in public mode")
+        print("✅ API credentials configured" if has_credentials else "⚠️  Running in public mode")
         print("✅ Market data retrieval functional" if ticker else "❌ Market data retrieval failed")
         print("✅ Paper trading available" if balance else "⚠️  Paper trading not initialized")
         print("✅ Order book analysis operational" if analysis else "❌ Order book analysis failed")
         print("=" * 60)
         print("\n✨ Phase 1 infrastructure ready for Phase 2 integration!")
-        print("   Next: Integrate Gemini 3.1 Pro for autonomous decision-making\n")
+        print("   Next: Integrate Gemini 2.5 Pro for autonomous decision-making\n")
 
 if __name__ == "__main__":
     agent = KrakenAgent()
     agent.run_phase_1_tests()
+
+```
