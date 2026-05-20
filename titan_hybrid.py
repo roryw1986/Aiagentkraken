@@ -27,8 +27,9 @@ from google.genai import types
 # Load environment variables
 load_dotenv()
 
-# Initialize Google GenAI Client
-client = genai.Client()
+# Initialize Google GenAI Client safely using target environment key string
+api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=api_key)
 
 # High-Conviction Digital Infrastructure Basket
 TARGET_PAIRS = ["ONDOUSD", "LINKUSD", "SOLUSD", "CFGUSD", "BTCUSD", "SKYUSD", "ZKUSD"]
@@ -44,7 +45,6 @@ class Tier1Gatekeeper:
     """
     
     def __init__(self, pair: str):
-        # Fixed double underscores and accepts pair dynamically
         self.pair = pair
         self.depth_tiers = 10
         self.spread_compression_threshold = 0.09
@@ -68,11 +68,26 @@ class Tier1Gatekeeper:
         except Exception as e:
             print(f"   ❌ Error fetching order book: {e}")
             return None
+            
+    def _unwrap_book(self, orderbook: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
+        """Helper to extract bids/asks from standard Kraken 'result' wrappers safely."""
+        res_data = orderbook.get("result", {})
+        
+        # If wrapped under pair name (e.g., {"result": {"ONDOUSD": {"bids": ...}}})
+        if self.pair in res_data and isinstance(res_data[self.pair], dict):
+            pair_data = res_data[self.pair]
+            return pair_data.get("bids", []), pair_data.get("asks", [])
+            
+        # Fallback if wrapped directly under result
+        if "bids" in res_data or "asks" in res_data:
+            return res_data.get("bids", []), res_data.get("asks", [])
+            
+        # Fallback for root level parsing
+        return orderbook.get("bids", []), orderbook.get("asks", [])
     
     def calculate_spread_compression(self, orderbook: Dict[str, Any]) -> Optional[float]:
         try:
-            bids = orderbook.get("bids", [])
-            asks = orderbook.get("asks", [])
+            bids, asks = self._unwrap_book(orderbook)
             
             if not bids or not asks:
                 return None
@@ -88,8 +103,7 @@ class Tier1Gatekeeper:
     
     def calculate_order_book_imbalance(self, orderbook: Dict[str, Any]) -> Optional[float]:
         try:
-            bids = orderbook.get("bids", [])
-            asks = orderbook.get("asks", [])
+            bids, asks = self._unwrap_book(orderbook)
             
             if not bids or not asks:
                 return None
@@ -165,7 +179,7 @@ YOUR CRITICAL EVALUATIONS:
 3. LIQUIDITY SWEEP VALIDATION: Ensure this coil is a true liquidity spring indicating imminent upward expansion from accumulated value.
 
 OUTPUT REQUIREMENT:
-Respond ONLY with valid JSON. No markdown, no prose.
+Respond ONLY with valid JSON. No markdown formatting blocks, no prose commentary.
 If institutional markers are weak, recommend HOLD to protect capital.
 
 Expected JSON Schema:
@@ -208,7 +222,7 @@ Respond ONLY in JSON.
             )
             
             decision = json.loads(response.text.strip())
-            print(f"   🧠 Brain Output: {decision.get('rationale')}")
+            print(f"   🧠 Brain Output: [{decision.get('action')}] - {decision.get('rationale')}")
             return decision
             
         except Exception as e:
