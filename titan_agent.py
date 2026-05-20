@@ -1,6 +1,6 @@
 """
 Titan Predator v4.0 - Autonomous Quantitative Trading Agent
-Integrates Kraken MCP with Gemini 3.1 Pro for institutional-grade execution decisions
+Integrates Kraken MCP with Gemini 2.5 Pro for institutional-grade execution decisions
 With Full Execution Routing to Kraken Paper Trading Engine
 """
 
@@ -9,11 +9,16 @@ import json
 import subprocess
 import time
 from datetime import datetime
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# 1. Initialize the Google GenAI Client
-client = genai.Client()
+# Load local environment variables securely
+load_dotenv()
+
+# Initialize the Google GenAI Client with explicit environment fallback key checks
+api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+client = genai.Client(api_key=api_key)
 
 # 2. Define the Institutional-Grade Titan Predator v4.0 Brain
 TITAN_SYSTEM_INSTRUCTION = """
@@ -60,7 +65,7 @@ Expected Output JSON Schema:
 """
 
 def get_kraken_market_data(pair="ONDOUSD"):
-    """Fetch real-time order book and market structure state"""
+    """Fetch real-time order book and market structure state, unwrapping CLI structures cleanly"""
     try:
         orderbook_result = subprocess.run(
             ["kraken", "orderbook", pair, "--depth", "20", "-o", "json"],
@@ -70,10 +75,12 @@ def get_kraken_market_data(pair="ONDOUSD"):
         )
         
         if orderbook_result.returncode != 0:
-            print(f"   ⚠️  Orderbook fetch failed: {orderbook_result.stderr}")
+            print(f"   ⚠️  Orderbook fetch failed: {orderbook_result.stderr.strip()}")
             return None
         
-        orderbook = json.loads(orderbook_result.stdout)
+        raw_ob = json.loads(orderbook_result.stdout)
+        # Cleanly extract standard Kraken nesting layer
+        orderbook = raw_ob.get("result", raw_ob)
         
         ticker_result = subprocess.run(
             ["kraken", "ticker", pair, "-o", "json"],
@@ -83,10 +90,11 @@ def get_kraken_market_data(pair="ONDOUSD"):
         )
         
         if ticker_result.returncode != 0:
-            print(f"   ⚠️  Ticker fetch failed: {ticker_result.stderr}")
+            print(f"   ⚠️  Ticker fetch failed: {ticker_result.stderr.strip()}")
             return None
         
-        ticker = json.loads(ticker_result.stdout)
+        raw_tick = json.loads(ticker_result.stdout)
+        ticker = raw_tick.get("result", raw_tick)
         
         market_data = {
             "pair": pair,
@@ -117,8 +125,8 @@ def execute_kraken_order(decision):
     order_type = decision.get("order_type", "market")
     confidence = decision.get("confidence", 0)
     
-    if volume is None or volume == 0:
-        print(f"   ⚠️  Invalid volume. Order not executed.")
+    if volume is None or str(volume) == "null" or float(volume) == 0:
+        print(f"   ⚠️  Invalid volume parameter. Order aborted.")
         return None
     
     try:
@@ -130,7 +138,7 @@ def execute_kraken_order(decision):
             print(f"      Volume: {volume}")
             
             # Construct Kraken CLI command for buy order
-            if order_type == "limit" and price:
+            if str(order_type).lower() == "limit" and price and str(price) != "null":
                 cmd = ["kraken", "paper", "order", "buy", pair, "limit", str(volume), str(price)]
                 print(f"      Price (Limit): {price}")
             else:
@@ -141,10 +149,10 @@ def execute_kraken_order(decision):
             
             if result.returncode == 0:
                 print(f"   ✅ KRAKEN PAPER CONFIRMATION:")
-                print(f"      {result.stdout}")
+                print(f"      {result.stdout.strip()}")
                 return {"status": "success", "action": "BUY", "output": result.stdout}
             else:
-                print(f"   ❌ KRAKEN ERROR: {result.stderr}")
+                print(f"   ❌ KRAKEN ERROR: {result.stderr.strip()}")
                 return {"status": "error", "action": "BUY", "error": result.stderr}
                 
         elif action == "SELL":
@@ -154,7 +162,7 @@ def execute_kraken_order(decision):
             print(f"      Volume: {volume}")
             
             # Construct Kraken CLI command for sell order
-            if order_type == "limit" and price:
+            if str(order_type).lower() == "limit" and price and str(price) != "null":
                 cmd = ["kraken", "paper", "order", "sell", pair, "limit", str(volume), str(price)]
                 print(f"      Price (Limit): {price}")
             else:
@@ -165,10 +173,10 @@ def execute_kraken_order(decision):
             
             if result.returncode == 0:
                 print(f"   ✅ KRAKEN PAPER CONFIRMATION:")
-                print(f"      {result.stdout}")
+                print(f"      {result.stdout.strip()}")
                 return {"status": "success", "action": "SELL", "output": result.stdout}
             else:
-                print(f"   ❌ KRAKEN ERROR: {result.stderr}")
+                print(f"   ❌ KRAKEN ERROR: {result.stderr.strip()}")
                 return {"status": "error", "action": "SELL", "error": result.stderr}
     
     except subprocess.TimeoutExpired:
@@ -179,12 +187,8 @@ def execute_kraken_order(decision):
         return {"status": "error", "action": action, "error": str(e)}
 
 def run_titan_hunter(single_shot=False):
-    """
-    Main Titan Predator v4.0 execution cycle
-    
-    Args:
-        single_shot: If True, run once. If False, run continuous loop.
-    """
+    """Main Titan Predator v4.0 execution cycle utilizing standard core targets"""
+    target_model = "gemini-2.5-pro"
     
     if single_shot:
         print("\n" + "=" * 70)
@@ -244,9 +248,9 @@ Output ONLY valid JSON with no additional text.
 """
 
             try:
-                print("   🧠 Gemini analyzing market structure...")
+                print(f"   🧠 Gemini analyzing market structure via {target_model}...")
                 response = client.models.generate_content(
-                    model='gemini-3.1-pro',
+                    model=target_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=TITAN_SYSTEM_INSTRUCTION,
@@ -303,11 +307,6 @@ Output ONLY valid JSON with no additional text.
 
 if __name__ == "__main__":
     import sys
-    
-    # Command line options:
-    # python3 titan_agent.py           (single cycle)
-    # python3 titan_agent.py loop      (continuous monitoring)
-    # python3 titan_agent.py loop 60   (continuous for 60 seconds then exit)
     
     mode = sys.argv[1] if len(sys.argv) > 1 else "single"
     
